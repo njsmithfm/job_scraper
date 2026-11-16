@@ -6,11 +6,7 @@ Usage:
     python job_scraper.py URL1 [URL2 ...]
     python job_scraper.py URL1 >> jobs.tsv   (to append to a file)
 
-Parses schema.org JobPosting JSON-LD (used by most job boards, incl.
-cityjobs.nyc.gov), with meta-tag fallback. Output columns match the
-tracker: Company, Position, Link, Location, Type, Mode,
-Min Salary, Deadline, Folder, Applied?, Date Applied, Outcome?, Notes
-"""
+Parses schema.org JobPosting JSON-LD with meta-tag fallback."""
 
 import json
 import re
@@ -26,8 +22,7 @@ HEADERS = {
 
 COLUMNS = [
     "Company", "Position", "Link", "Location", "Type",
-    "Mode", "Min Salary", "Deadline", "Folder", "Applied?",
-    "Date Applied", "Outcome?", "Notes",
+    "Mode", "Min Salary", "Deadline"
 ]
 
 
