@@ -1,0 +1,18 @@
+[job_scraper]
+name = "job-scraper"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "jupyter>=1.1.1",
+    "pandas>=3.1.1",
+]
+
+[project.scripts]
+job-scraper = "job_scraper:main"
+
+[build-system]
+requires = ["uv_build>=0.13.8,<0.14.0"]
+build-backend = "uv_build"
