@@ -4,12 +4,13 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 authors = [
-    { name = "NJ Smith", email = "134447517+njsmithfm@users.noreply.github.com" }
+    { name = "NJ Smith" }
 ]
 requires-python = ">=3.14"
 dependencies = [
     "beautifulsoup4>=4.15.0",
     "ipykernel>=7.4.0",
+    "playwright>=1.65.2",
     "requests>=2.34.2",
 ]
 
