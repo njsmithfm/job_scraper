@@ -3,43 +3,64 @@
 job_scraper.py — scrape job postings and save a PDF of each page.
 
 Usage:
-    python job_scraper.py URL1 [URL2 ...]
+    uv run python job_scraper.py URL1 [URL2 ...]
 
 Details print to the terminal (tab-separated, paste straight into your
 spreadsheet). Each page is saved as a PDF in ./pdfs/ named
-CompanyName_JobTitle.pdf.
+CompanyName_JobTitle.pdf. If the URL already points at a PDF (including
+Google Drive /view links), the file is downloaded as-is and its text
+is scraped instead of rendering with Playwright.
 
-Requires:
-    pip install requests beautifulsoup4 playwright
-    playwright install chromium
+Requires (deps are in pyproject.toml):
+    uv add requests beautifulsoup4 playwright pypdf
+    uv run playwright install chromium
 """
 
+import io
 import json
 import re
 import sys
 from pathlib import Path
 
+import pypdf
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 }
 
 COLUMNS = [
-    "Company", "Position", "Link", "Location", "Type",
-    "Mode", "Min Salary", "Deadline"
+    "Company",
+    "Position",
+    "Link",
+    "Location",
+    "Type",
+    "Mode",
+    "Min Salary",
+    "Deadline",
 ]
 
 PDF_DIR = Path("pdfs")
 
 
-def fetch(url):
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    return r.text
+def fetch_response(url):
+    return requests.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
+
+
+def is_pdf_response(resp):
+    ctype = resp.headers.get("Content-Type", "")
+    return "pdf" in ctype.lower() or resp.content[:5] == b"%PDF-"
+
+
+def drive_direct_url(url):
+    """Convert a Google Drive /view link to a direct-download link."""
+    m = re.search(r"drive\.google\.com/file/d/([^/]+)", url)
+    if m:
+        return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
+    return url
 
 
 def slug(text):
@@ -65,7 +86,7 @@ def iter_jsonld(html):
     for tag in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(tag.string or "")
-        except (json.JSONDecodeError, TypeError):
+        except json.JSONDecodeError, TypeError:
             continue
         stack = [data]
         while stack:
@@ -82,6 +103,7 @@ def iter_jsonld(html):
 
 def first_city(obj):
     """Pull a location string out of whatever nesting the site uses."""
+
     def fmt(addr):
         if not addr:
             return ""
@@ -129,12 +151,64 @@ def employment_type(obj):
     return t.replace("_", " ").title() if isinstance(t, str) else ""
 
 
+def page_deadline(html):
+    """Read 'Posted until MM/DD/YYYY' from the visible page text."""
+    text = BeautifulSoup(html, "html.parser").get_text(" ")
+    m = re.search(r"Posted until\s*:?\s*(\d{1,2}/\d{1,2}/\d{4})", text)
+    return m.group(1) if m else ""
+
+
+def scrape_pdf(url, data):
+    """Scrape a PDF's text and return a row whose _pdf_bytes is the raw file."""
+    reader = pypdf.PdfReader(io.BytesIO(data))
+    text = "\n".join(page.extract_text() or "" for page in reader.pages)
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    position = lines[0] if lines else ""
+
+    m = re.search(
+        r"(?:posted until|deadline|closing date|open until|apply by)"
+        r"[:\s]*([A-Za-z]+ \d{1,2},? \d{4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        text,
+        re.I,
+    )
+    deadline = m.group(1) if m else ""
+
+    return {
+        "Company": "",
+        "Position": position,
+        "Link": url,
+        "Location": "",
+        "Type": "",
+        "Min Salary": salary({}, text),
+        "Deadline": deadline,
+        "_pdf_bytes": data,
+    }
+
+
 def scrape(url):
-    html = fetch(url)
+    resp = fetch_response(url)
+    resp.raise_for_status()
+
+    # Source is already a PDF: download it and scrape its text
+    if is_pdf_response(resp):
+        return scrape_pdf(drive_direct_url(url), resp.content)
+
+    # Google Drive view links serve HTML first; retry as direct download
+    if "drive.google.com" in url:
+        resp = fetch_response(drive_direct_url(url))
+        resp.raise_for_status()
+        if is_pdf_response(resp):
+            return scrape_pdf(url, resp.content)
+
+    html = resp.text
     job = next(iter_jsonld(html), None)
 
     if job:
         org = job.get("hiringOrganization") or {}
+        deadline = page_deadline(html) or job.get("validThrough", "")
+        if "T" in deadline:
+            deadline = deadline.split("T")[0]
         return {
             "Company": org.get("name", "") if isinstance(org, dict) else str(org),
             "Position": job.get("title", ""),
@@ -142,7 +216,7 @@ def scrape(url):
             "Location": first_city(job),
             "Type": employment_type(job),
             "Min Salary": salary(job, html),
-            "Deadline": job.get("validThrough", ""),
+            "Deadline": deadline,
         }
 
     # Fallback: meta/OpenGraph tags (weaker, varies by site)
@@ -187,15 +261,22 @@ def main():
         stem = f"{slug(row['Company'])}_{slug(row['Position'])}" or "job"
         path = PDF_DIR / f"{stem}.pdf"
         try:
-            save_pdf(url, path)
+            pdf_bytes = row.pop("_pdf_bytes", None)
+            if pdf_bytes is not None:
+                path.write_bytes(pdf_bytes)  # source was already a PDF
+            else:
+                save_pdf(url, path)
             print(f"# Saved PDF: {path}", file=sys.stderr)
         except Exception as e:
             print(f"# ERROR saving PDF for {url}: {e}", file=sys.stderr)
 
+    def clean(v):
+        return re.sub(r"[\t\r\n]+", " ", str(v))
+
     rows.sort(key=lambda r: r["Position"].lower())
     print("\t".join(COLUMNS))
     for r in rows:
-        print("\t".join(r.get(c, "") for c in COLUMNS))
+        print("\t".join(clean(r.get(c, "")) for c in COLUMNS))
 
 
 if __name__ == "__main__":
